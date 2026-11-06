@@ -205,8 +205,132 @@ elif page == "Data Health Audit":
                 )
 
 elif page == "Exploratory Data Analysis":
-    st.subheader("Automated Exploratory Data Analysis")
-    st.info("Statistical analysis and interactive charts are coming next.")
+
+    from modules.eda import (
+        get_numeric_summary,
+        get_categorical_summary,
+        get_correlation_matrix
+    )
+
+    st.header("Exploratory Data Analysis")
+    st.write(
+        "Explore statistical patterns, relationships "
+        "and distributions in your dataset."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload a CSV dataset for EDA",
+        type=["csv"],
+        key="eda_upload"
+    )
+
+    if uploaded_file is not None:
+
+        df = pd.read_csv(uploaded_file)
+
+        st.success("Dataset loaded successfully!")
+
+        # 1. Numerical Analysis
+        st.markdown("## Numerical Analysis")
+
+        numeric_summary = get_numeric_summary(df)
+
+        if numeric_summary is not None:
+            st.dataframe(numeric_summary, width="stretch")
+        else:
+            st.info("No numerical columns found.")
+
+        # 2. Categorical Analysis
+        st.markdown("## Categorical Analysis")
+
+        categorical_summary = get_categorical_summary(df)
+
+        if categorical_summary is not None:
+            st.dataframe(categorical_summary, width="stretch")
+        else:
+            st.info("No categorical columns found.")
+
+        # 3. Correlation Heatmap
+        st.markdown("## Correlation Analysis")
+
+        correlation = get_correlation_matrix(df)
+
+        if correlation is not None:
+
+            import plotly.express as px
+
+            fig = px.imshow(
+                correlation,
+                text_auto=True,
+                aspect="auto",
+                color_continuous_scale="RdBu_r",
+                title="Feature Correlation Heatmap"
+            )
+
+            st.plotly_chart(fig, width="stretch")
+
+        else:
+            st.info(
+                "At least two numerical columns are "
+                "required for correlation analysis."
+            )
+
+        # 4. Interactive Visualisation
+        st.markdown("## Interactive Visualisation")
+
+        numeric_columns = df.select_dtypes(
+            include="number"
+        ).columns.tolist()
+
+        categorical_columns = df.select_dtypes(
+            include=["object", "category", "bool"]
+        ).columns.tolist()
+
+        if numeric_columns:
+
+            selected_column = st.selectbox(
+                "Select a numerical column",
+                numeric_columns
+            )
+
+            fig = px.histogram(
+                df,
+                x=selected_column,
+                title=f"Distribution of {selected_column}",
+                marginal="box"
+            )
+
+            st.plotly_chart(fig, width="stretch")
+
+        if categorical_columns:
+
+            selected_category = st.selectbox(
+                "Select a categorical column",
+                categorical_columns
+            )
+
+            category_counts = (
+                df[selected_category]
+                .value_counts()
+                .reset_index()
+            )
+
+            category_counts.columns = [
+                selected_category,
+                "Count"
+            ]
+
+            fig = px.bar(
+                category_counts,
+                x=selected_category,
+                y="Count",
+                title=f"Distribution of {selected_category}"
+            )
+
+            st.plotly_chart(fig, width="stretch")
+
+    else:
+        st.info("Upload a CSV file to begin exploratory analysis.")
 
 elif page == "AI Data Analyst":
     st.subheader("Conversational AI Data Analyst")
