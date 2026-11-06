@@ -207,10 +207,11 @@ elif page == "Data Health Audit":
 elif page == "Exploratory Data Analysis":
 
     from modules.eda import (
-        get_numeric_summary,
-        get_categorical_summary,
-        get_correlation_matrix
-    )
+    get_numeric_summary,
+    get_categorical_summary,
+    get_correlation_matrix,
+    get_outlier_summary
+)
 
     st.header("Exploratory Data Analysis")
     st.write(
@@ -274,6 +275,36 @@ elif page == "Exploratory Data Analysis":
                 "At least two numerical columns are "
                 "required for correlation analysis."
             )
+
+        
+        # 4. Outlier Detection
+        st.markdown("## Outlier Detection")
+
+        outlier_report = get_outlier_summary(df)
+
+        if outlier_report is not None and not outlier_report.empty:
+
+            st.dataframe(
+                outlier_report,
+                width="stretch"
+            )
+
+            total_outliers = int(
+                outlier_report["Outlier Count"].sum()
+            )
+
+            st.metric(
+                "Total Potential Outliers",
+                total_outliers
+            )
+
+            st.caption(
+                "Outliers are detected using the 1.5 × IQR rule. "
+                "They are flagged, not automatically removed."
+            )
+
+        else:
+            st.info("No numerical columns available for outlier detection.")
 
         # 4. Interactive Visualisation
         st.markdown("## Interactive Visualisation")
