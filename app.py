@@ -210,7 +210,8 @@ elif page == "Exploratory Data Analysis":
     get_numeric_summary,
     get_categorical_summary,
     get_correlation_matrix,
-    get_outlier_summary
+    get_outlier_summary,
+    get_outlier_records
 )
 
     st.header("Exploratory Data Analysis")
@@ -280,7 +281,13 @@ elif page == "Exploratory Data Analysis":
         # 4. Outlier Detection
         st.markdown("## Outlier Detection")
 
-        outlier_report = get_outlier_summary(df)
+        numeric_columns = df.select_dtypes(include="number").columns.tolist()
+
+        exclude_columns = st.multiselect("Exclude columns from outlier detection",options=numeric_columns, 
+                help="Select columns that should not be treated as continuous numerical variables.")
+
+        available_columns = [col for col in numeric_columns if col not in exclude_columns]
+        outlier_report = get_outlier_summary(df,exclude_columns=exclude_columns)
 
         if outlier_report is not None and not outlier_report.empty:
 
@@ -303,9 +310,78 @@ elif page == "Exploratory Data Analysis":
                 "They are flagged, not automatically removed."
             )
 
+            
+            # Actual Outlier Records
+            st.markdown("### Actual Outlier Records")
+
+            selected_records_column = st.selectbox(
+                "Choose a column to inspect outlier records",
+                available_columns,
+                key="outlier_records_column"
+            )
+
+            outlier_records = get_outlier_records(
+                df,
+                selected_records_column
+            )
+
+            st.metric(
+                "Records Identified",
+                len(outlier_records)
+            )
+
+            if not outlier_records.empty:
+
+                st.dataframe(
+                    outlier_records,
+                    width="stretch"
+                )
+
+                csv_data = outlier_records.to_csv(
+                    index=False
+                ).encode("utf-8")
+
+                st.download_button(
+                    label="Download Outlier Records",
+                    data=csv_data,
+                    file_name=f"{selected_records_column}_outliers.csv",
+                    mime="text/csv"
+                )
+
+            else:
+                st.success("No outlier records found in this column.")
+            
+            # Box Plot Visualisation
+            st.markdown("### Outlier Box Plot")
+            
+            if available_columns:
+
+                selected_outlier_column = st.selectbox(
+                    "Select a column to inspect",
+                    available_columns,
+                    key="outlier_boxplot_column"
+                )
+
+                fig = px.box(
+                    df,
+                    y=selected_outlier_column,
+                    points="outliers",
+                    title=f"Outlier Distribution: {selected_outlier_column}"
+                )
+
+                st.plotly_chart(
+                    fig,
+                    width="stretch"
+                )
+
+            else:
+                st.info("No columns available for box plot analysis.")
+
+
         else:
             st.info("No numerical columns available for outlier detection.")
 
+        
         # 4. Interactive Visualisation
         st.markdown("## Interactive Visualisation")
 

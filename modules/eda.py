@@ -40,12 +40,18 @@ def get_correlation_matrix(df):
     return numeric_df.corr().round(2)
 
 
-def get_outlier_summary(df):
-    """
-    Detect outliers in numerical columns using the IQR method.
-    """
+
+def get_outlier_summary(df, exclude_columns=None):
+    if exclude_columns is None:
+        exclude_columns = []
 
     numeric_df = df.select_dtypes(include=np.number)
+
+    # Remove user-selected columns
+    numeric_df = numeric_df.drop(
+        columns=exclude_columns,
+        errors="ignore"
+    )
 
     if numeric_df.empty:
         return None
@@ -54,28 +60,25 @@ def get_outlier_summary(df):
 
     for column in numeric_df.columns:
 
-        # Remove missing values before calculating quartiles
         values = numeric_df[column].dropna()
 
         if values.empty:
             continue
 
-        # Calculate first and third quartiles
         Q1 = values.quantile(0.25)
         Q3 = values.quantile(0.75)
 
-        # Calculate Interquartile Range
         IQR = Q3 - Q1
 
-        # Calculate outlier boundaries
         lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
 
-        # Identify outliers
-        outliers = values[
+        outlier_mask = (
             (values < lower_bound) |
             (values > upper_bound)
-        ]
+        )
+
+        outliers = values[outlier_mask]
 
         results.append({
             "Column": column,
@@ -91,3 +94,32 @@ def get_outlier_summary(df):
         })
 
     return pd.DataFrame(results)
+
+
+def get_outlier_records(df, column):
+    """
+    Return rows containing outliers in the selected column
+    using the 1.5 × IQR method.
+    """
+
+    values = df[column].dropna()
+
+    if values.empty:
+        return pd.DataFrame()
+
+    Q1 = values.quantile(0.25)
+    Q3 = values.quantile(0.75)
+    IQR = Q3 - Q1
+
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    outlier_mask = (
+        (df[column] < lower_bound) |
+        (df[column] > upper_bound)
+    )
+
+    outlier_records = df.loc[outlier_mask].copy()
+
+    return outlier_records
+
