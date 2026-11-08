@@ -5,4 +5,3 @@ __pycache__/
 .streamlit/secrets.toml
 .vscode/
 .DS_Store
-.streamlit/secrets.toml
