@@ -3,6 +3,38 @@ from openrouter import OpenRouter
 import json
 from modules.analytics_tools import execute_tool_call
 
+def get_friendly_error(error):
+    error_text = str(error).lower()
+
+    if "429" in error_text or "rate limit" in error_text:
+        return (
+            "Our AI service is experiencing high demand. "
+            "Please try again later."
+        )
+
+    if "quota" in error_text or "credits" in error_text:
+        return (
+            "The AI usage limit has been reached. "
+            "Please try again after the quota resets."
+        )
+
+    if "401" in error_text or "403" in error_text:
+        return (
+            "The AI service could not authorize this request. "
+            "Please contact the administrator."
+        )
+
+    if "timeout" in error_text or "connection" in error_text:
+        return (
+            "We're temporarily unable to connect to the AI service. "
+            "Please try again shortly."
+        )
+
+    return (
+        "Something went wrong while analysing your data. "
+        "Please try again later."
+    )
+
 def ask_model(prompt, model="openrouter/free"):
     try:
         api_key = st.secrets["OPENROUTER_API_KEY"]
@@ -264,65 +296,90 @@ def request_tool_call(prompt, model="openrouter/free"):
             "tool_calls": None
         }
 
-def run_data_analyst(df, prompt, model="openrouter/free"):
-    """Run a dataset-aware AI analysis with controlled tool execution."""
+def run_data_analyst(df, prompt, model="openrouter/free", history=None):
+    """Run dataset-aware analysis while retaining recent conversation context."""
 
-    messages = [
-        
-        {
+    system_message = {
         "role": "system",
         "content": (
             "You are DataMind AI, a professional data analyst.\n\n"
             f"AVAILABLE DATASET COLUMNS: {df.columns.tolist()}\n\n"
-            
             "IMPORTANT RULES:\n"
             "1. Use only exact column names from the dataset.\n"
             "2. For a single column's statistics, use get_column_summary.\n"
             "3. For comparisons across groups, use get_grouped_analysis.\n"
             "4. For conditions or filtered calculations, use get_filtered_analysis.\n"
             "5. For relationships between two numeric columns, use get_correlation_analysis.\n"
-            "6. Do not call multiple tools for a question that needs only one tool.\n"
-            "7. After receiving tool results, explain them directly. Do not repeat a completed calculation.\n"
-            "8. Never invent numerical results.\n"
-            "9. Correlation does not establish causation.\n"
-            "10. If the user asks for a chart or plot, use generate_chart.\n"
-            "11. Choose a chart type appropriate to the requested analysis.\n")
-        },
+            "6. Use only the approved analytical tools; never write or execute arbitrary Python code.\n"
+            "7. After receiving tool results, explain them directly. Never invent numerical results.\n"
+            "8. Correlation does not establish causation.\n"
+            "9. If the user asks for a chart or plot, use generate_chart.\n"
+            "10. Use earlier messages to resolve references such as 'that column', "
+            "'the same group', or 'show it as a chart'.\n"
+            "11. If a question cannot be answered from the dataset or tools, say so clearly."
+        )
+    }
 
-        {
-            "role": "user",
-            "content": prompt
-        }
+    # Only pass ordinary conversational turns. Tool-call messages from older
+    # requests are intentionally not replayed; their final answers provide context.
+    recent_history = []
+    for item in (history or [])[-10:]:
+        if (
+            isinstance(item, dict)
+            and item.get("role") in ("user", "assistant")
+            and isinstance(item.get("content"), str)
+            and item["content"].strip()
+        ):
+            recent_history.append({
+                "role": item["role"],
+                "content": item["content"][:4000]
+            })
+
+    messages = [system_message] + recent_history + [
+        {"role": "user", "content": prompt}
     ]
+
     chart_keywords = [
-    "plot", "chart", "visualise", "visualize",
-    "graph", "scatter", "histogram"
+        "plot", "chart", "visualise", "visualize", "graph",
+        "scatter", "histogram", "box plot", "bar chart"
     ]
-
     is_chart_request = any(
-        keyword in prompt.lower()
-        for keyword in chart_keywords
+        keyword in prompt.lower() for keyword in chart_keywords
     )
+
     try:
         api_key = st.secrets["OPENROUTER_API_KEY"]
 
         with OpenRouter(api_key=api_key) as client:
+            debug_log = []
 
-            # Allow up to 3 rounds of tool requests.
-            debug_log=[]
-            for _ in range(5):
+            # A chart request should create one chart, then move on to a
+            # normal model response. Re-forcing generate_chart on every round
+            # caused repeated identical charts and exhausted the tool loop.
+            for round_index in range(5):
+                available_tools = [
+                    COLUMN_SUMMARY_TOOL,
+                    GROUPED_ANALYSIS_TOOL,
+                    FILTERED_ANALYSIS_TOOL,
+                    CORRELATION_TOOL
+                ]
+
+                # Permit chart generation only in the first round. Once the
+                # chart result is returned, the model must explain that result
+                # rather than generating the same chart again.
+                if not (is_chart_request and round_index > 0):
+                    available_tools.append(CHART_TOOL)
 
                 response = client.chat.send(
                     model=model,
                     messages=messages,
-                    tools=[COLUMN_SUMMARY_TOOL, GROUPED_ANALYSIS_TOOL, FILTERED_ANALYSIS_TOOL,
-                           CORRELATION_TOOL, CHART_TOOL],
-                    tool_choice=({
+                    tools=available_tools,
+                    tool_choice=(
+                        {
                             "type": "function",
                             "function": {"name": "generate_chart"}
                         }
-                        if is_chart_request
-                        else "auto"
+                        if is_chart_request and round_index == 0 else "auto"
                     ),
                     stream=False
                 )
@@ -330,15 +387,23 @@ def run_data_analyst(df, prompt, model="openrouter/free"):
                 message = response.choices[0].message
                 tool_calls = message.tool_calls
 
-                # If the model has finished answering, return its response.
                 if not tool_calls:
-                    return {"answer": message.content or "The model returned an empty response.",
-                    "debug": debug_log}
+                    answer = message.content or ""
 
-                # Preserve the assistant's tool request in conversation history.
+                    if not answer.strip():
+                        answer = (
+                            "We couldn't complete your analysis this time. "
+                            "Your data is safe. Please try again in a moment."
+                        )
+
+                    return {
+                        "answer": answer,
+                        "debug": debug_log,
+                        "error": not bool(message.content and message.content.strip())
+                    }
                 messages.append({
                     "role": "assistant",
-                    "content": message.content,
+                    "content": message.content or "",
                     "tool_calls": [
                         {
                             "id": call.id,
@@ -352,32 +417,61 @@ def run_data_analyst(df, prompt, model="openrouter/free"):
                     ]
                 })
 
-                # Execute each approved tool and send its result back.
                 for call in tool_calls:
-
                     result = execute_tool_call(
                         df,
                         call.function.name,
                         call.function.arguments
                     )
                     debug_log.append({
-                    "tool": call.function.name,
-                    "arguments": call.function.arguments,
-                    "result": result
+                        "tool": call.function.name,
+                        "arguments": call.function.arguments,
+                        "result": result
                     })
-
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.id,
                         "content": json.dumps(result, default=str)
                     })
 
+            # If the provider keeps requesting tools, preserve any useful
+            # calculations already completed instead of returning a dead end.
+            completed_tools = [
+                item.get("tool", "analysis")
+                for item in debug_log
+            ]
+            if is_chart_request and any(
+                item.get("tool") == "generate_chart" for item in debug_log
+            ):
+                fallback_answer = (
+                    "I've generated the requested chart. The model could not "
+                    "finish its written interpretation within the tool-call "
+                    "limit, but you can still inspect the visualisation below."
+                )
+            elif debug_log:
+                fallback_answer = (
+                    "I completed part of the analysis, but the model did not "
+                    "finish its explanation. Completed tools: "
+                    + ", ".join(completed_tools)
+                    + ". Please try a narrower follow-up."
+                )
+            else:
+                fallback_answer = (
+                    "I couldn't complete the analysis within the tool-call "
+                    "limit. Please try a more specific question."
+                )
+
             return {
-                "answer": "Analysis stopped after reaching the tool-call limit.",
+                "answer": fallback_answer,
                 "debug": debug_log
             }
+
     except Exception as error:
-        return f"DataMind AI Error: {error}"
+        return {
+            "answer": get_friendly_error(error),
+            "debug": [],
+            "error": True
+        }
 
 def generate_followups(question, answer, model="openrouter/free"):
     """Generate relevant follow-up questions from the latest analysis."""

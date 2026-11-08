@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import json
+import re
 import hashlib
 from modules.llm_engine import run_data_analyst
 from modules.report_generator import generate_pdf_report, generate_markdown_report
@@ -380,7 +381,6 @@ elif page == "Data Health Audit":
                             color="Missing Percentage (%)",
                             color_continuous_scale="Blues"
                         )
-
                         st.plotly_chart(
                             fig,
                             use_container_width=True,
@@ -409,7 +409,12 @@ elif page == "Exploratory Data Analysis":
         get_categorical_summary,
         get_correlation_matrix,
         get_outlier_summary,
-        get_outlier_records
+        get_outlier_records,
+        get_identifier_columns,
+        get_binary_numeric_columns,
+        get_numeric_columns,
+        get_categorical_columns,
+        get_default_outlier_exclusions
     )
 
     st.header("📈 Exploratory Data Analysis")
@@ -422,7 +427,6 @@ elif page == "Exploratory Data Analysis":
     )
 
     if uploaded_file is not None:
-
         try:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file)
@@ -430,27 +434,62 @@ elif page == "Exploratory Data Analysis":
 
             if df.empty or len(df.columns) == 0:
                 st.error("The uploaded dataset is empty.")
-
             else:
+                identifier_columns = get_identifier_columns(df)
+                binary_columns = get_binary_numeric_columns(df)
+                numeric_columns = get_numeric_columns(df)
+                categorical_columns = get_categorical_columns(df)
 
-                numeric_columns = df.select_dtypes(
-                    include="number"
-                ).columns.tolist()
-
-                categorical_columns = df.select_dtypes(
-                    include=["object", "category", "bool"]
-                ).columns.tolist()
-
-                # Dataset overview
-                st.success(
-                    f"Dataset loaded: {uploaded_file.name}"
-                )
+                st.success(f"Dataset loaded: {uploaded_file.name}")
 
                 c1, c2, c3 = st.columns(3)
-
                 c1.metric("Rows", f"{df.shape[0]:,}")
                 c2.metric("Columns", df.shape[1])
-                c3.metric("Numerical Features", len(numeric_columns))
+                c3.metric("Analytical Numeric Features", len(numeric_columns))
+
+                with st.expander("⚙️ Analysis settings", expanded=False):
+                    st.caption(
+                        "DataMind AI automatically identifies likely record IDs and "
+                        "high-cardinality text columns. These are excluded from default "
+                        "analysis to avoid misleading charts. You can include them below."
+                    )
+                    include_ids_in_stats = st.checkbox(
+                        "Include likely identifier columns in statistical summaries",
+                        value=False,
+                        key="eda_include_ids_stats"
+                    )
+                    include_ids_in_correlation = st.checkbox(
+                        "Include likely identifier columns in correlation analysis",
+                        value=False,
+                        key="eda_include_ids_corr"
+                    )
+                    include_high_cardinality = st.checkbox(
+                        "Include high-cardinality text columns in category charts",
+                        value=False,
+                        key="eda_include_high_cardinality"
+                    )
+
+                    if identifier_columns:
+                        st.caption("Likely identifiers: " + ", ".join(map(str, identifier_columns)))
+                    if binary_columns:
+                        st.caption("Binary numeric columns (excluded from IQR by default): "
+                                   + ", ".join(map(str, binary_columns)))
+
+                if include_ids_in_stats:
+                    numeric_summary_columns = df.select_dtypes(include="number").columns.tolist()
+                    categorical_summary_columns = df.select_dtypes(
+                        include=["object", "category", "bool"]
+                    ).columns.tolist()
+                else:
+                    numeric_summary_columns = numeric_columns
+                    categorical_summary_columns = categorical_columns
+
+                if include_high_cardinality:
+                    chart_categorical_columns = df.select_dtypes(
+                        include=["object", "category", "bool"]
+                    ).columns.tolist()
+                else:
+                    chart_categorical_columns = categorical_columns
 
                 tab1, tab2, tab3, tab4 = st.tabs([
                     "📊 Statistical Summary",
@@ -459,54 +498,37 @@ elif page == "Exploratory Data Analysis":
                     "📉 Visualisation"
                 ])
 
-                # --------------------------------
-                # TAB 1: STATISTICAL SUMMARY
-                # --------------------------------
-
                 with tab1:
-
                     st.subheader("Numerical Analysis")
-
-                    numeric_summary = get_numeric_summary(df)
-
+                    numeric_summary = (
+                        df[numeric_summary_columns].describe().T
+                        if numeric_summary_columns else None
+                    )
                     if numeric_summary is not None:
-
-                        st.dataframe(
-                            numeric_summary,
-                            use_container_width=True
-                        )
-
+                        numeric_summary["median"] = df[numeric_summary_columns].median()
+                        numeric_summary["missing_values"] = df[numeric_summary_columns].isnull().sum()
+                        st.dataframe(numeric_summary.round(2), use_container_width=True)
                     else:
-                        st.info("No numerical columns found.")
+                        st.info("No suitable numerical columns found.")
 
                     st.divider()
-
                     st.subheader("Categorical Analysis")
-
-                    categorical_summary = get_categorical_summary(df)
+                    categorical_summary = get_categorical_summary(
+                        df[categorical_summary_columns],
+                        include_identifiers=True
+                    ) if categorical_summary_columns else None
 
                     if categorical_summary is not None:
-
-                        st.dataframe(
-                            categorical_summary,
-                            use_container_width=True
-                        )
-
+                        st.dataframe(categorical_summary, use_container_width=True)
                     else:
-                        st.info("No categorical columns found.")
-
-                # --------------------------------
-                # TAB 2: CORRELATION
-                # --------------------------------
+                        st.info("No suitable categorical columns found.")
 
                 with tab2:
-
                     st.subheader("Feature Correlation Heatmap")
-
-                    correlation = get_correlation_matrix(df)
-
+                    correlation = get_correlation_matrix(
+                        df, include_identifiers=include_ids_in_correlation
+                    )
                     if correlation is not None:
-
                         fig = px.imshow(
                             correlation,
                             text_auto=True,
@@ -516,294 +538,187 @@ elif page == "Exploratory Data Analysis":
                             zmin=-1,
                             zmax=1
                         )
-
                         st.plotly_chart(
-                            fig,
-                            use_container_width=True,
-                            key="eda_correlation"
+                            fig, use_container_width=True, key="eda_correlation"
                         )
-
                         st.caption(
-                            "Correlation ranges from -1 to +1. "
-                            "Correlation does not necessarily imply causation."
+                            "Binary outcome columns (such as Exited) remain included. "
+                            "Likely identifiers are excluded by default. Correlation "
+                            "does not necessarily imply causation."
                         )
-
                     else:
-
                         st.info(
-                            "At least two numerical columns are required "
+                            "At least two suitable numerical columns are required "
                             "for correlation analysis."
                         )
 
-                # --------------------------------
-                # TAB 3: OUTLIER DETECTION
-                # --------------------------------
-
                 with tab3:
-
                     st.subheader("IQR-Based Outlier Detection")
+                    all_numeric_columns = df.select_dtypes(include="number").columns.tolist()
 
-                    if numeric_columns:
-
+                    if all_numeric_columns:
+                        default_exclusions = get_default_outlier_exclusions(df)
                         exclude_columns = st.multiselect(
                             "Exclude columns from outlier detection",
-                            options=numeric_columns,
+                            options=all_numeric_columns,
+                            default=default_exclusions,
                             help=(
-                                "Exclude IDs, encoded categories or "
-                                "discrete count variables when IQR "
-                                "outlier analysis is not meaningful."
+                                "Likely IDs and binary flags are excluded by default. "
+                                "You can change the selection. Consider excluding "
+                                "encoded categories and discrete count fields when "
+                                "the IQR rule is not meaningful for them."
                             ),
                             key="eda_exclude_columns"
                         )
-
                         available_columns = [
-                            col for col in numeric_columns
-                            if col not in exclude_columns
+                            col for col in all_numeric_columns if col not in exclude_columns
                         ]
-
                         outlier_report = get_outlier_summary(
-                            df,
-                            exclude_columns=exclude_columns
+                            df, exclude_columns=exclude_columns
                         )
 
-                        if (
-                            outlier_report is not None
-                            and not outlier_report.empty
-                        ):
-
+                        if outlier_report is not None and not outlier_report.empty:
                             st.dataframe(
-                                outlier_report,
-                                use_container_width=True,
-                                hide_index=True
+                                outlier_report, use_container_width=True, hide_index=True
                             )
-
-                            total_outliers = int(
-                                outlier_report["Outlier Count"].sum()
-                            )
-
-                            st.metric(
-                                "Total Potential Outlier Flags",
-                                f"{total_outliers:,}"
-                            )
-
+                            total_outliers = int(outlier_report["Outlier Count"].sum())
+                            st.metric("Total Potential Outlier Flags", f"{total_outliers:,}")
                             st.caption(
-                                "The 1.5 × IQR rule identifies potential "
-                                "outliers. These are flags, not confirmed "
-                                "errors, and are not automatically removed."
+                                "The 1.5 × IQR rule identifies potential outliers, not "
+                                "confirmed errors. Flags are not automatically removed."
                             )
 
                             if available_columns:
-
                                 st.divider()
-
                                 st.markdown("#### Inspect Outlier Records")
-
                                 selected_records_column = st.selectbox(
                                     "Choose a numerical column",
                                     available_columns,
                                     key="outlier_records_column"
                                 )
-
                                 outlier_records = get_outlier_records(
-                                    df,
-                                    selected_records_column
+                                    df, selected_records_column
                                 )
-
-                                st.metric(
-                                    "Records Identified",
-                                    len(outlier_records)
-                                )
+                                st.metric("Records Identified", len(outlier_records))
 
                                 if not outlier_records.empty:
-
-                                    st.dataframe(
-                                        outlier_records,
-                                        use_container_width=True
-                                    )
-
-                                    csv_data = outlier_records.to_csv(
-                                        index=False
-                                    ).encode("utf-8")
-
+                                    st.dataframe(outlier_records, use_container_width=True)
+                                    csv_data = outlier_records.to_csv(index=False).encode("utf-8")
                                     st.download_button(
                                         "⬇️ Download Outlier Records",
                                         data=csv_data,
-                                        file_name=(
-                                            f"{selected_records_column}_outliers.csv"
-                                        ),
+                                        file_name=f"{selected_records_column}_outliers.csv",
                                         mime="text/csv",
                                         key="outlier_download"
                                     )
-
                                 else:
-
-                                    st.success(
-                                        "No outlier records found in this column."
-                                    )
+                                    st.success("No outlier records found in this column.")
 
                                 st.divider()
-
                                 st.markdown("#### Outlier Box Plot")
-
                                 selected_box_column = st.selectbox(
                                     "Select a column to visualise",
                                     available_columns,
                                     key="outlier_boxplot_column"
                                 )
-
                                 fig = px.box(
-                                    df,
-                                    y=selected_box_column,
-                                    points="outliers",
-                                    title=(
-                                        f"Distribution of {selected_box_column}"
-                                    )
+                                    df, y=selected_box_column, points="outliers",
+                                    title=f"Distribution of {selected_box_column}"
                                 )
-
                                 st.plotly_chart(
-                                    fig,
-                                    use_container_width=True,
-                                    key="outlier_boxplot"
+                                    fig, use_container_width=True, key="outlier_boxplot"
                                 )
-
                             else:
-
-                                st.info(
-                                    "All numerical columns have been excluded."
-                                )
-
+                                st.info("All numerical columns have been excluded.")
                         else:
-
-                            st.info(
-                                "No numerical columns available for "
-                                "outlier detection."
-                            )
-
+                            st.info("No eligible numerical columns are available for IQR analysis.")
                     else:
-
                         st.info("No numerical columns found.")
 
-                # --------------------------------
-                # TAB 4: INTERACTIVE VISUALISATION
-                # --------------------------------
-
                 with tab4:
-
                     st.subheader("Explore Your Features")
 
                     if numeric_columns:
-
                         st.markdown("#### Numerical Feature Distribution")
-
                         selected_column = st.selectbox(
                             "Select a numerical column",
                             numeric_columns,
                             key="eda_numeric_visual"
                         )
-
-                        chart_type = st.segmented_control(
+                        chart_type = st.radio(
                             "Choose visualisation",
-                            options=["Histogram", "Box Plot"],
-                            default="Histogram",
+                            ["Histogram", "Box Plot"],
+                            horizontal=True,
                             key="eda_numeric_chart"
                         )
-
                         if chart_type == "Box Plot":
-
                             fig = px.box(
-                                df,
-                                y=selected_column,
+                                df, y=selected_column,
                                 title=f"Box Plot: {selected_column}"
                             )
-
                         else:
-
                             fig = px.histogram(
-                                df,
-                                x=selected_column,
-                                marginal="box",
+                                df, x=selected_column, marginal="box",
                                 title=f"Distribution of {selected_column}"
                             )
-
                         st.plotly_chart(
-                            fig,
-                            use_container_width=True,
-                            key="eda_numeric_plot"
+                            fig, use_container_width=True, key="eda_numeric_plot"
                         )
+                    else:
+                        st.info("No suitable numerical columns available for visualisation.")
 
-                    if categorical_columns:
-
+                    if chart_categorical_columns:
                         st.divider()
-
                         st.markdown("#### Categorical Feature Distribution")
-
                         selected_category = st.selectbox(
                             "Select a categorical column",
-                            categorical_columns,
+                            chart_categorical_columns,
                             key="eda_category_visual"
                         )
-
                         category_counts = (
-                            df[selected_category]
+                            df[selected_category].astype("string")
+                            .fillna("(Missing)")
                             .value_counts()
                             .head(20)
-                            .reset_index()
+                            .rename_axis(selected_category)
+                            .reset_index(name="Count")
                         )
-
-                        category_counts.columns = [
-                            selected_category,
-                            "Count"
-                        ]
-
                         fig = px.bar(
                             category_counts,
                             x=selected_category,
                             y="Count",
-                            title=(
-                                f"Top 20 Categories: {selected_category}"
-                            )
+                            title=f"Top 20 Categories: {selected_category}"
                         )
-
                         fig.update_layout(
                             xaxis_title=selected_category,
                             yaxis_title="Count"
                         )
-
                         st.plotly_chart(
-                            fig,
-                            use_container_width=True,
-                            key="eda_category_plot"
+                            fig, use_container_width=True, key="eda_category_plot"
                         )
-
-                        if df[selected_category].nunique() > 20:
-
+                        if df[selected_category].nunique(dropna=True) > 20:
                             st.caption(
-                                "Showing the 20 most frequent categories "
-                                "to keep the chart readable."
+                                "Showing the 20 most frequent categories to keep "
+                                "the chart readable."
                             )
-
-                    if not numeric_columns and not categorical_columns:
-
+                    else:
                         st.info(
-                            "No supported numerical or categorical "
-                            "columns were found."
+                            "No suitable categorical columns found. Enable high-cardinality "
+                            "text columns in Analysis settings if you want to inspect them."
                         )
 
         except Exception as error:
-
             st.error(f"Unable to analyse the dataset: {error}")
-
     else:
-
         st.info("Upload a CSV file to begin exploratory analysis.")
 
 
 elif page == "AI Data Analyst":
 
-    st.header("Conversational AI Data Analyst")
-    st.write(
-        "Ask questions about your dataset in natural language. "
-        "DataMind AI will analyse the data and explain the results."
+    st.header("🤖 Conversational AI Data Analyst")
+    st.caption(
+        "Ask questions about your uploaded dataset. DataMind AI uses approved "
+        "analytical tools to calculate results and explain them."
     )
 
     uploaded_file = st.file_uploader(
@@ -813,178 +728,162 @@ elif page == "AI Data Analyst":
     )
 
     if uploaded_file is not None:
-
         try:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file)
+            file_bytes = uploaded_file.getvalue()
+            fingerprint = hashlib.sha256(file_bytes).hexdigest()
+            if st.session_state.get("ai_dataset_fingerprint") != fingerprint:
+                df_new = pd.read_csv(uploaded_file)
+                df_new.columns = df_new.columns.astype(str).str.strip()
 
-            if df.empty or len(df.columns) == 0:
-                st.error("The uploaded dataset is empty.")
-            else:
-                df.columns = df.columns.astype(str).str.strip()
+                if df_new.empty or len(df_new.columns) == 0:
+                    st.error("The uploaded dataset is empty.")
+                    st.stop()
 
-                st.session_state["ai_dataset"] = df
+                st.session_state["ai_dataset"] = df_new
                 st.session_state["ai_dataset_name"] = uploaded_file.name
-
+                st.session_state["ai_dataset_fingerprint"] = fingerprint
+                st.session_state["ai_messages"] = []
         except Exception as error:
             st.error(f"Unable to load dataset: {error}")
 
-    # Retrieve the uploaded dataset from session state.
     df = st.session_state.get("ai_dataset")
 
     if df is not None:
-
         st.success(
             f"Dataset ready: {st.session_state.get('ai_dataset_name', 'Uploaded CSV')}"
         )
 
-        col1, col2 = st.columns(2)
-        col1.metric("Rows", df.shape[0])
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Rows", f"{df.shape[0]:,}")
         col2.metric("Columns", df.shape[1])
+        col3.metric("Conversation turns", len(st.session_state.get("ai_messages", [])) // 2)
 
-        with st.expander("View dataset preview"):
+        with st.expander("Preview dataset"):
             st.dataframe(df.head(10), use_container_width=True)
 
-        st.markdown("### Ask your data analyst")
+        if "ai_messages" not in st.session_state:
+            st.session_state["ai_messages"] = []
 
-        question = st.text_input(
-            "Your question",
-            placeholder="Example: What is the average age?",
-            key="ai_analyst_question"
-        )
+        top_left, top_right = st.columns([4, 1])
+        with top_left:
+            st.markdown("### Chat with your dataset")
+        with top_right:
+            if st.button("＋ New chat", use_container_width=True):
+                st.session_state["ai_messages"] = []
+                st.rerun()
 
-        if st.button("Analyse", type="primary"):
+        # Render the existing conversation, including any charts returned
+        # by the analytical chart tool for each assistant turn.
+        for message_index, chat_item in enumerate(st.session_state["ai_messages"]):
+            with st.chat_message(chat_item["role"]):
+                st.markdown(chat_item["content"])
 
-            if not question.strip():
-                st.warning("Please enter a question first.")
+                if chat_item["role"] == "assistant":
+                    debug_log = chat_item.get("debug", [])
+                    chart_items = [
+                        item for item in debug_log
+                        if item.get("tool") == "generate_chart"
+                    ]
 
-            else:
-                with st.spinner("Analysing your dataset..."):
+                    # Defensive guard: one assistant turn should display at
+                    # most one chart, even if a provider returns duplicates.
+                    for chart_index, item in enumerate(chart_items[-1:]):
+                        spec = item.get("result", {})
+                        if not isinstance(spec, dict) or "error" in spec:
+                            if isinstance(spec, dict):
+                                st.warning(spec.get("error", "Unable to create chart."))
+                            continue
 
-                    result = run_data_analyst(df, question)
+                        chart_type = spec.get("chart_type")
+                        x = spec.get("x_column")
+                        y = spec.get("y_column")
+                        aggregation = spec.get("aggregation", "mean")
 
-                # Handle both successful and failed responses.
-                if isinstance(result, dict):
+                        try:
+                            if chart_type == "histogram":
+                                fig = px.histogram(df, x=x, title=spec.get("title"))
+                            elif chart_type == "scatter":
+                                fig = px.scatter(df, x=x, y=y, title=spec.get("title"))
+                            elif chart_type == "box":
+                                fig = px.box(df, y=y, title=spec.get("title"))
+                            elif chart_type == "bar":
+                                if aggregation == "count":
+                                    chart_data = (
+                                        df.groupby(x, dropna=False)
+                                        .size()
+                                        .reset_index(name="Count")
+                                    )
+                                    fig = px.bar(
+                                        chart_data, x=x, y="Count",
+                                        title=spec.get("title")
+                                    )
+                                else:
+                                    chart_data = (
+                                        df.groupby(x, dropna=False)[y]
+                                        .agg(aggregation)
+                                        .reset_index()
+                                    )
+                                    fig = px.bar(
+                                        chart_data, x=x, y=y,
+                                        title=spec.get("title")
+                                    )
+                            else:
+                                continue
+                            if chart_type == "bar" and y == "Exited":
+                                fig.update_layout(yaxis_title="Churn Rate")
 
-                    answer = result.get(
-                        "answer",
-                        "No answer was returned."
-                    )
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                key=f"ai_chart_{message_index}_{chart_index}"
+                            )
+                        except Exception as chart_error:
+                            st.warning(f"Chart could not be rendered: {chart_error}")
 
-                    debug_log = result.get("debug", [])
 
-                else:
-                    answer = str(result)
-                    debug_log = []
+        question = st.chat_input("Ask a question about your data...")
 
-                st.session_state["ai_last_answer"] = answer
-                st.session_state["ai_last_debug"] = debug_log
-                st.session_state["ai_last_question"] = question
+        if question:
+            previous_messages = [
+                {"role": item["role"], "content": item["content"]}
+                for item in st.session_state["ai_messages"]
+            ]
+            st.session_state["ai_messages"].append({
+                "role": "user",
+                "content": question
+            })
 
-        # Display the most recent answer.
-        if st.session_state.get("ai_last_answer"):
-
-            st.divider()
-            st.markdown("### DataMind AI's Analysis")
-
-            st.markdown(st.session_state["ai_last_answer"])
-
-            # Display charts generated by the approved chart tool.
-            debug_log = st.session_state.get("ai_last_debug", [])
-
-            for item in debug_log:
-
-                if item.get("tool") != "generate_chart":
-                    continue
-
-                spec = item.get("result", {})
-
-                if "error" in spec:
-                    st.warning(spec["error"])
-                    continue
-
-                chart_type = spec.get("chart_type")
-                x = spec.get("x_column")
-                y = spec.get("y_column")
-                aggregation = spec.get("aggregation", "mean")
-
-                if chart_type == "histogram":
-
-                    fig = px.histogram(
-                        df,
-                        x=x,
-                        title=spec.get("title")
-                    )
-
-                elif chart_type == "scatter":
-
-                    fig = px.scatter(
-                        df,
-                        x=x,
-                        y=y,
-                        title=spec.get("title")
-                    )
-
-                elif chart_type == "box":
-
-                    fig = px.box(
-                        df,
-                        y=y,
-                        title=spec.get("title")
-                    )
-
-                elif chart_type == "bar":
-
-                    if aggregation == "count":
-                        chart_data = (
-                            df.groupby(x, dropna=False)
-                            .size()
-                            .reset_index(name="Count")
-                        )
-
-                        fig = px.bar(
-                            chart_data,
-                            x=x,
-                            y="Count",
-                            title=spec.get("title")
-                        )
-
-                    else:
-                        chart_data = (
-                            df.groupby(x, dropna=False)[y]
-                            .agg(aggregation)
-                            .reset_index()
-                        )
-
-                        fig = px.bar(
-                            chart_data,
-                            x=x,
-                            y=y,
-                            title=spec.get("title")
-                        )
-
-                else:
-                    continue
-
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    key=f"ai_chart_{len(debug_log)}_{chart_type}"
+            with st.spinner("DataMind AI is analysing your dataset..."):
+                result = run_data_analyst(
+                    df,
+                    question,
+                    history=previous_messages
                 )
 
-            # Show tool execution details for debugging.
-            with st.expander("View analytical tool details"):
 
-                if debug_log:
-                    st.json(debug_log)
-                else:
-                    st.caption(
-                        "No analytical tool was executed for this response."
-                    )
+            if isinstance(result, dict):
+                answer = result.get("answer", "No answer was returned.")
+                debug_log = result.get("debug", [])
+
+                # Remove broken image Markdown from the AI response
+                answer = re.sub(
+                    r'!\[[^\]]*\]\([^)]+\)',
+                    '',
+                    answer
+                )
+            else:
+                answer = str(result)
+                debug_log = []
+
+            st.session_state["ai_messages"].append({
+                "role": "assistant",
+                "content": answer,
+                "debug": debug_log
+            })
+            st.rerun()
 
     else:
-        st.info("Upload a CSV file to start asking questions.")
-
+        st.info("Upload a CSV file to start a conversation with DataMind AI.")
 
 
 elif page == "Executive Reports":
